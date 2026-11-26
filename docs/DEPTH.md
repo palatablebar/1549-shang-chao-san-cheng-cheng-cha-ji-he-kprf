@@ -28,5 +28,6 @@ AI/ML · 传统ML · 中型
 | TRAP-42 | 拟合窗口后才回传结果 | 依标签成熟时间屏蔽，未来数据不参与拟合 | `src/weighttally/tare_versions/service.py` | `tests/test_tare_versions.py::test_mature_label_cannot_cross_partition` |
 | TRAP-43 | 回放没有成熟记录 | 记录未定义状态，避免以零误差替代 | `src/weighttally/basket_backtest/service.py` | `tests/test_basket_backtest.py::test_no_outcome_gets_undefined_metrics` |
 | TRAP-44 | 校准样本不足 | 分派前转人工判读并保留原因 | `src/weighttally/basket_backtest/service.py` | `tests/test_basket_backtest.py::test_empty_calibration_requires_review` |
+| TRAP-45 | 分区校准选套与标签泄漏 | 候选只用同区校准期实绩；回放正负签齐全、旧版命中异常不丢、正常签误报严格减少才启用，否则沿用全场；换序结论一致 | `src/weighttally/basket_backtest/service.py` | `tests/test_workbench.py::test_input_order_cannot_change_disposition` |
 | TRAP-53 | 单条推断与混批 | 复用冻结参数，各条估计完全一致 | `src/weighttally/tare_deviation/service.py` | `tests/test_tare_deviation.py::test_input_batch_invariance` |
 | TRAP-54 | 特征版本与模型不配对 | 拒绝继续推断并要求重拟合 | `src/weighttally/tare_deviation/service.py` | `tests/test_tare_deviation.py::test_mismatched_model_input_version_fails` |

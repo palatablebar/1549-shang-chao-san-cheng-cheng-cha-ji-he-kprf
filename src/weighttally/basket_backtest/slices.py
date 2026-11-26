@@ -2,6 +2,48 @@ from collections import defaultdict
 from statistics import median
 
 
+def cohort_groups(points):
+    """按作业区（cohort）归集回放点，返回 {cohort: [point, ...]}。"""
+    grouped = defaultdict(list)
+    for measure in points:
+        raw = getattr(measure, 'raw', measure)
+        grouped[getattr(raw, 'cohort', None)].append(measure)
+    return {cohort: grouped[cohort] for cohort in sorted(grouped, key=lambda v: str(v))}
+
+
+# 近义名
+group_by_cohort = cohort_groups
+cohort_slices_grouped = cohort_groups
+
+
+def cohort_slices(points, threshold=.6):
+    """各作业区回放的命中/误报/漏查计数，键顺序稳定。"""
+    rows = []
+    for cohort, measures in cohort_groups(points).items():
+        confirmed = [m for m in measures
+                     if getattr(m.raw, 'observed', True) and m.raw.outcome in (0, 1)]
+        positives = [m for m in confirmed if m.raw.outcome == 1]
+        normals = [m for m in confirmed if m.raw.outcome == 0]
+        caught = [m for m in positives if m.estimate >= threshold]
+        false_alarms = [m for m in normals if m.estimate >= threshold]
+        rows.append({
+            '作业区': cohort,
+            '回放实绩': len(confirmed),
+            '正常签': len(normals),
+            '异常签': len(positives),
+            '抓住异常': len(caught),
+            '漏查': len(positives) - len(caught),
+            '正常签误报': len(false_alarms),
+            '命中单': tuple(sorted(m.raw.key for m in caught)),
+            '误报单': tuple(sorted(m.raw.key for m in false_alarms)),
+        })
+    return rows
+
+
+replay_by_cohort = cohort_slices
+cohort_replay = cohort_slices
+
+
 def groups_for_basket_backtest(raw):
     ticket_g, actual_g, tare_g, temp_c, bins, return_g = raw
     if ticket_g<420:

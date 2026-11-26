@@ -50,7 +50,7 @@ def stage_at(index, details, records, issues=()):
     return {'key': code, 'title': title, 'summary': details, 'records': list(records), 'errors': list(issues)}
 
 
-def rows_for(plan, scored, vectors):
+def rows_for(plan, scored, vectors, choices=None):
     by_key = {item.key: item for item in scored}
     factor_names = ('相对实称差', '扣皮比', '退秤比', '温漂因子', '分拣格负荷')
     order = []
@@ -62,9 +62,16 @@ def rows_for(plan, scored, vectors):
         else:
             driver = ' · '.join(f'{amount:+.2f}' for amount in point.contributions)
         interval = ('–' if job.lower is None else f'{job.lower:.2f}–{job.upper:.2f}')
+        decision = choices.get(job.cohort) if choices is not None else None
+        calibration_reason = (decision.reason if decision is not None
+                              else f'{job.cohort} 无同区校准期与回放实绩，当班沿用全场校准')
         order.append({'key': job.key, 'zone': job.cohort, 'estimate': job.estimate, 'interval': interval,
                       'state': job.state, 'cost': job.cost, 'reason': job.reason, 'evidence': job.summary,
                       'drivers': driver, 'missing': len(point.missing), 'hits': list(job.rule_hits),
+                      'calibration_scope': decision.scope if decision is not None else 'global',
+                      'calibration_set': decision.scheme if decision is not None else '全场校准',
+                      'calibration_code': decision.code if decision is not None else 'GLOBAL_CALIBRATION',
+                      'calibration_reason': calibration_reason,
                       'measurements': dict(zip(('ticket_g', 'actual_g', 'tare_g', 'temp_c', 'bins', 'return_g'), point.input_values, strict=True)),
                       'unmeasured': list(point.missing), 'operations': feature_service.business_factors(vectors[job.key])})
     return order
@@ -100,9 +107,14 @@ class ShiftDossier:
         checked = calibration_service.prepare_verification(predictions['calibration'])
         return checked, predictions
 
-    def verification(self, observed, calibration):
-        holdout = calibration_service.validate_predictions(observed['replay'],calibration)
-        assignment = calibration_service.validate_predictions(observed['live'],calibration)
+    def verification(self, observed, calibration, choices=None):
+        if choices is None:
+            holdout = calibration_service.validate_predictions(observed['replay'],calibration)
+            assignment = calibration_service.validate_predictions(observed['live'],calibration)
+        else:
+            # 回放与当班都按各作业区选定的校准（分区或全场）出分
+            holdout = calibration_service.validate_with_selections(observed['replay'], choices)
+            assignment = calibration_service.validate_with_selections(observed['live'], choices)
         prepared = self.prepared
         baseline = monitor_service.fit_baseline(prepared.train,self.feature_stamp.fingerprint)
         detection = monitor_service.scan_current(baseline,prepared.live,self.feature_stamp.fingerprint)
@@ -119,7 +131,12 @@ def execute(documents, capacity=12, mode='balanced', *, as_of=96):
         raise ValueError('需要 1 至 2500 份可识别单据')
     dossier = ShiftDossier(documents,as_of)
     fitted_calibration, estimates = dossier.grading()
-    evaluated, checked_live, drift = dossier.verification(estimates,fitted_calibration)
+    live_cohorts = {point.cohort for point in estimates['live']}
+    # 判定集合取“校准期 ∪ 回放期”出现的作业区；只有当班单、没有历史实绩的
+    # 未知/临时作业区不产生分区候选，verification_for 自动回退全场校准。
+    calibration_choices = calibration_service.select_cohort_calibrations(
+        estimates['calibration'], estimates['replay'], fitted_calibration)
+    evaluated, checked_live, drift = dossier.verification(estimates,fitted_calibration,calibration_choices)
     allocation = dispatch_service.plan_jobs(checked_live,drift.domain,capacity,mode)
     closed = dossier.seal(allocation,mode)
     intake,windows,state,features,kernel = dossier.accepted,dossier.history,dossier.feature_stamp,dossier.prepared,dossier.forecaster
@@ -135,7 +152,7 @@ def execute(documents, capacity=12, mode='balanced', *, as_of=96):
         {'label': '额度结余', 'value': allocation.balance},
     ]
     vectors = {item.key: item for item in features.live}
-    row_list = rows_for(allocation, scored, vectors)
+    row_list = rows_for(allocation, scored, vectors, calibration_choices)
     operating_rows = dispatch_service.operating_ledger(row_list)
     overtime = calibration_service.boundary_diagnostics(evaluated, 0.6)
     sector = calibration_service.sector_replay(evaluated, 0.6)
@@ -144,12 +161,16 @@ def execute(documents, capacity=12, mode='balanced', *, as_of=96):
     features_glance = feature_service.feature_evidence(state) + feature_service.measure_review(features)
     weight_rows = [{'量测': key, '取值': value} for key, value in kernel.evidence]
     ignored = [issue.evidence() for issue in intake.issues]
+    zone_evidence = calibration_choices.evidence()
+    adopted_zones = calibration_choices.adopted_cohorts
+    calibration_summary = (f'{fitted_calibration.method} · {performance.status} · '
+                           f'{performance.count} 条回放实绩 · 分区校准启用 {len(adopted_zones)}/{len(calibration_choices)} 区')
     details = [
         stage_at(0, f'接收 {intake.source_rows} 条，采用 {len(intake.entries)} 条', intake_service.preliminary_evidence(intake), ignored),
         stage_at(1, f'拟合 {len(windows.train)} 条，校准 {len(windows.calibration)} 条，回放 {len(windows.replay)} 条', cohort_service.window_evidence(windows) + cohort_service.readiness_evidence(windows, as_of)),
         stage_at(2, '特征转换版本 ' + state.fingerprint, features_glance),
         stage_at(3, kernel.name, weight_rows + model_service.inspection_rows(kernel, features) + comparison_rows(scored)),
-        stage_at(4, f'{fitted_calibration.method} · {performance.status} · {performance.count} 条回放实绩', calibration_service.calibration_evidence(performance) + [overtime] + sector),
+        stage_at(4, calibration_summary, calibration_service.calibration_evidence(performance) + [overtime] + sector + zone_evidence),
         stage_at(5, f'{drift.status} · {len(drift.domain)} 张单据需外推判读', monitor_service.shift_evidence(drift, coverage) + operating_shift),
         stage_at(6, f'本班占用 {allocation.capacity-allocation.balance} / {allocation.capacity} 个工位单位', dispatch_service.action_evidence(allocation) + dispatch_service.operating_group(checked_live, allocation)),
         stage_at(7, f'处置凭证 {closed.stamp} · 额度守恒', audit_service.reconciliation_evidence(closed) + field_evidence['执行业务单']),
@@ -159,7 +180,8 @@ def execute(documents, capacity=12, mode='balanced', *, as_of=96):
     points = [{'label': row['key'], 'value': row['estimate'], 'state': row['state'], 'zone': row['zone'],
                'upper': row['interval'], 'cost': row['cost']} for row in sorted(row_list, key=lambda row: row['key'])]
     def estimate(vector):
-        return calibration_service.check_point(model_service.predict_one(kernel, vector), fitted_calibration).estimate
+        anchor = calibration_choices.verification_for(vector.cohort)
+        return calibration_service.check_point(model_service.predict_one(kernel, vector), anchor).estimate
 
     # Compare interventions against frozen features, model and calibration;
     # scenario estimates never overwrite the base ticket or its decision.
@@ -169,10 +191,31 @@ def execute(documents, capacity=12, mode='balanced', *, as_of=96):
         row['joint_experiments'] = feature_service.render_joint_experiments(current,state,estimate)
     details[7]['records'].extend(audit_service.site_checklist(row_list))
     details[7]['records'].extend(audit_service.intervention_summary(row_list))
+    choice_rows = calibration_choices.to_list()
+    choice_map = {row_choice['cohort']: row_choice for row_choice in choice_rows}
+    live_only_cohorts = sorted(live_cohorts - set(choice_map), key=str)
+    details[4]['calibration_choices'] = choice_rows
+    details[4]['cohort_calibrations'] = choice_rows
+    details[4]['cohort_calibration'] = choice_map
+    details[4]['adopted_cohorts'] = list(adopted_zones)
+    details[4]['live_only_cohorts'] = live_only_cohorts
     overview_report = {'capacity' : capacity, 'mode': mode, 'as_of': as_of, 'sample_hash': closed.batch_hash,
               'policy_hash': closed.policy_hash, 'feature_stamp': state.fingerprint,
               'model': kernel.name, 'run_id': closed.stamp, 'object_name': DISPLAY['object_name'],
               'unit': DISPLAY['unit'], 'sections': details, 'flow_counts': list(states.items()),
+              'calibration_choices': choice_rows,
+              'cohort_calibrations': choice_rows,
+              'cohort_decisions': choice_rows,
+              'calibration_decisions': choice_rows,
+              'zone_decisions': choice_rows,
+              'cohort_calibration': choice_map,
+              'zone_calibration': choice_map,
+              'calibration_by_cohort': {c: d['calibration_parameters'] for c, d in choice_map.items()},
+              'calibration_plan': {'cutoff': calibration_service.CALIBRATION_CUTOFF,
+                                   'global_method': fitted_calibration.method,
+                                   'adopted_cohorts': list(adopted_zones),
+                                   'live_only_cohorts': live_only_cohorts,
+                                   'cohorts': choice_rows},
               'measures': {'ticket_g': ('标签重量', 'g'),
  'actual_g': ('抽秤实际', 'g'),
  'tare_g': ('扣皮重量', 'g'),

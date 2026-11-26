@@ -5,7 +5,7 @@ const code = document.body.dataset.endpoint;
 const endpoint = `/api/${code}`;
 const nav = [...document.querySelectorAll('[data-stage]')];
 let currentBatch = null;
-const order = {key:'单号',zone:'作业区',estimate:'估计',interval:'估计区间',state:'处置',cost:'用量',reason:'原因码',evidence:'处理依据',drivers:'主要影响项',missing:'缺测量',hits:'命中规则'};
+const order = {key:'单号',zone:'作业区',estimate:'估计',interval:'估计区间',state:'处置',cost:'用量',reason:'原因码',evidence:'处理依据',calibration_set:'当班校准',calibration_code:'校准判定码',calibration_reason:'校准缘由',drivers:'主要影响项',missing:'缺测量',hits:'命中规则'};
 const visibleOrder = ['key','zone','estimate','state','cost'];
 let ledger;
 let focus = 6;
